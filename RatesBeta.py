@@ -20,7 +20,7 @@ if __name__ == '__main__':
     
 #%%   Define functions that will be used for parrallelizing the slow portions of the code (using multiprocessing pools)
 
-
+#This is used to get weekly returns.  It sets a common weekly index and calculates the returns, rate chagnes.  each permno (ticker) is a seperate process
 def makeWeekly(args):
     df,indexBase = args
     df= pd.merge(indexBase, df, how='inner', on=['date'])
@@ -28,6 +28,7 @@ def makeWeekly(args):
     df['rate'] = df['rate'].diff() 
     return df
 
+#This runs the rates beta regressions.  Each year is a seperate process, which is then grouped at the ticker level for regression
 def getBetas(args):
     year,one_df=args
     betaDict2 = dict()
@@ -42,8 +43,8 @@ def getBetas(args):
     print(year)
     return betaDict2
 
+#this creates the decile level portfolios.   Each year is a seperate process, it is then grouped by year, then decile.  data is aggregated using a marketcap weighted average.
 def calcWeightedReturns(args):
-        
     parts = []
     aggParts=[]
     year,one_df,betaDictCopy=args
@@ -51,7 +52,6 @@ def calcWeightedReturns(args):
     if year not in betaDictCopy.keys():
         print(str(year)+" not in betadict")
         return -1;
-
 
     one_df=one_df.set_index(['permno'])
     one_df['shrout*prc']=one_df['shrout'].multiply(one_df['prc'])    
@@ -79,7 +79,7 @@ if __name__ == '__main__':
     startDate = '1/01/1963'
     linkstartDate = '1/01/1900'
 
-
+    #this will be used to remove any companies that were delisted within a year
     delists = db.raw_sql("""select delistingdt, permno
                             from crsp.stkdelists 
                             where delistingdt>= '""" +startDate+ """'
@@ -88,6 +88,7 @@ if __name__ == '__main__':
     
     delists['year']=delists['delistingdt'].astype('datetime64[ns]').dt.year
 
+    #this is used to create the weekly baseline index, and for market betas
     sp500 = db.raw_sql("""select caldt, vwretd
                             from crsp.dsp500
                             where caldt>='""" +startDate+ """'
@@ -97,6 +98,7 @@ if __name__ == '__main__':
     #used to create an index for weekly returns
     sp500['caldt']=sp500['caldt'].astype('datetime64[ns]')
 
+    #this gets the earnings, dividend etc data.
     compustat = db.raw_sql("""select gvkey, datadate, fyear, BKVLPS, EPSPX, DVC, PRCC_F, CSHO
                             from comp.funda 
                             where datadate>='""" +linkstartDate+ """'
@@ -107,10 +109,10 @@ if __name__ == '__main__':
     compustat['EY'] = compustat['epspx'].divide(compustat['prcc_f'])
     compustat['PriceBook'] = compustat['prcc_f'].divide(compustat['bkvlps'])
     compustat['DY'] = (compustat['dvc'].divide(compustat['csho'])).divide(compustat['prcc_f'])
-    
     compustat['datadate']=compustat['datadate'].astype('datetime64[ns]')
     compustat = compustat.rename(columns={'fyear': 'year'})
 
+    #stock level daily data
     crsp = db.raw_sql("""select permno, date, prc, ret, shrout 
                             from crsp.dsf 
                             where date>='""" +startDate+ """'
@@ -123,6 +125,7 @@ if __name__ == '__main__':
     crsp['prc']=crsp['prc'].abs()
     crsp=crsp[crsp['prc']>5]
     
+    #CCM link table used to merge compustat and CRSP
     link = db.raw_sql("""select *
                             from crsp.ccmxpf_linktable 
                             where linkenddt >='""" +linkstartDate+ """'
@@ -171,6 +174,7 @@ if __name__ == '__main__':
     elif ratecode == 'DTB3':
         rateType='3M'  #DGS3MO
             
+    #get rates from fred
     if weekly:
         rates = fred.get_series(ratecode,observation_start='1963-1-1')#.diff()
     else:
@@ -187,12 +191,12 @@ if __name__ == '__main__':
     # Merge CRSP and Rates data (inner join) - only common dates remain
     merged = data.merge(rates,left_index=True,right_index=True).dropna()
     
+    #run pool to make return horizon weekly (if weekly flag is true)
     if weekly:
         print("running weekly pool")
         sp500.index=sp500['caldt']
         indexBase = sp500.resample("W-WED").last()
         indexBase.columns=["date",'vwret']
-        
         parts = []
         pool = mp.Pool(mp.cpu_count())
         ret_list = pool.map(makeWeekly, [[df,indexBase] for permno, df in merged.groupby(['permno'])])
@@ -347,6 +351,7 @@ if __name__ == '__main__':
     capmMerged['y']=capmMerged['weightedReturn'].sub(capmMerged['mrate'])
     capmMerged=capmMerged.dropna()
 
+    #performs market beta regression
     parts=[]
     capmBetaDict=dict()
     for year, one_df in capmMerged.groupby(capmMerged.index.year):
@@ -399,7 +404,7 @@ if __name__ == '__main__':
 
 
     
-    #Plot bklps over time
+    #Plot price-book ratio over time
     plt.rcParams['figure.figsize'] = (10,10)
     for decile, one_df in aggregate.groupby(['decile']):   
         one_df.name=decile
@@ -411,7 +416,7 @@ if __name__ == '__main__':
     plt.show()
 
     
-    #Plot epspi over time
+    #Plot earning yield over time
     plt.rcParams['figure.figsize'] = (10,10)
     for decile, one_df in aggregate.groupby(['decile']):   
         one_df.name=decile
@@ -423,7 +428,7 @@ if __name__ == '__main__':
     plt.show()
 
     
-    #Plot dvc over time
+    #Plot div yield over time
     plt.rcParams['figure.figsize'] = (10,10)
     for decile, one_df in aggregate.groupby(['decile']):   
         one_df.name=decile
