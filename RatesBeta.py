@@ -6,6 +6,10 @@ Created on Fri Nov 18 18:09:41 2022
 @author: matthewmassicotte
 """
 
+
+#TODO:
+#    FIX WEEKLY RETURNS
+#    FIX MONTHLY WEIGTHED RETURNS
 if __name__ == '__main__':
 
     import pandas as pd
@@ -21,10 +25,12 @@ if __name__ == '__main__':
 #%%   Define functions that will be used for parrallelizing the slow portions of the code (using multiprocessing pools)
 
 #This is used to get weekly returns.  It sets a common weekly index and calculates the returns, rate chagnes.  each permno (ticker) is a seperate process
+#NEED TO FIX WEEKLY RETURNS
 def makeWeekly(args):
     df,indexBase = args
     df= pd.merge(indexBase, df, how='inner', on=['date'])
-    df['ret'] = df['prc'].pct_change()
+    # df['ret'] = df['prc'].pct_change()
+    df['ret'] = df['weeklyret']
     df['rate'] = df['rate'].diff() 
     return df
 
@@ -94,9 +100,19 @@ if __name__ == '__main__':
                             where caldt>='""" +startDate+ """'
                             """, 
                           date_cols=['caldt'])
-    
+  
     #used to create an index for weekly returns
     sp500['caldt']=sp500['caldt'].astype('datetime64[ns]')
+    
+    #this is used for CAPM Betas
+    sp500_monthly = db.raw_sql("""select caldt, vwretd
+                            from crsp.msp500
+                            where caldt>='""" +startDate+ """'
+                            """, 
+                          date_cols=['caldt'])
+  
+    #used to create an index for weekly returns
+    sp500_monthly['caldt']=sp500_monthly['caldt'].astype('datetime64[ns]')
 
     #this gets the earnings, dividend etc data.
     compustat = db.raw_sql("""select gvkey, datadate, fyear, BKVLPS, EPSPX, DVC, PRCC_F, CSHO
@@ -125,6 +141,14 @@ if __name__ == '__main__':
     crsp['prc']=crsp['prc'].abs()
     crsp=crsp[crsp['prc']>5]
     
+    crsp['weeklyret']=crsp['ret']+1
+    crsp['weeklyret'] = (crsp
+      .set_index("date")
+      .groupby(["permno",pd.Grouper(freq='W-WED')])["weeklyret"].transform('prod')).values-1
+
+    # crsp2=crsp[crsp["permno"]==10180]
+    
+
     #CCM link table used to merge compustat and CRSP
     link = db.raw_sql("""select *
                             from crsp.ccmxpf_linktable 
@@ -176,9 +200,9 @@ if __name__ == '__main__':
             
     #get rates from fred
     if weekly:
-        rates = fred.get_series(ratecode,observation_start='1963-1-1')#.diff()
+        rates = fred.get_series(ratecode,observation_start=startDate)#.diff()
     else:
-        rates = fred.get_series(ratecode,observation_start='1963-1-1').diff()
+        rates = fred.get_series(ratecode,observation_start=startDate).diff()
         
     rates.name="rate"
     rates=rates.to_frame()
@@ -190,7 +214,7 @@ if __name__ == '__main__':
     
     # Merge CRSP and Rates data (inner join) - only common dates remain
     merged = data.merge(rates,left_index=True,right_index=True).dropna()
-    
+    #RETURNS FOR MONTHY AND WEEKLY ARE PROBS WRONG
     #run pool to make return horizon weekly (if weekly flag is true)
     if weekly:
         print("running weekly pool")
@@ -213,7 +237,12 @@ if __name__ == '__main__':
     #drop columns that have no more utility 
     merged=merged.drop(['delistingdt', '_merge','gvkey','bkvlps','startyear','datadate','epspx',	'dvc',	'prcc_f',	'csho','linkprim',	'liid'	,'linktype',	'lpermco',	'usedflag',	'linkdt',	'linkenddt'	,'endyear'], axis=1)
     merged.index=merged['date']
-        
+# #%%
+
+# crsp2=crsp[crsp['year'].isin([1986,1987,1988])]
+# #%%
+# merged2=merged[merged['year'].isin([1986,1987,1988])]
+
 #%% running multiprocessing pools
 if __name__ == '__main__':
     
@@ -230,6 +259,7 @@ if __name__ == '__main__':
     pool.join()
     
     # convert list of return values (dictionaries for each year) into a dictionary of dictionaries
+    #Test(dataset) is in chronological order, so the grouping will be too (map preserves order)
     for i,year in enumerate(test.index.year.unique()):
         betaDict[year] = ret_list[i]
 
@@ -243,18 +273,19 @@ if __name__ == '__main__':
         betaDictCopy[year]=pd.DataFrame.from_dict(betaDictCopy[year], orient ='index')
         betaDictCopy[year].columns=['Beta']
         betaDictCopy[year]=betaDictCopy[year][betaDictCopy[year]['Beta']!=0]
-        # x=betaDictCopy[year-1]
         
         #if previous years data exists, assign deciles based on that years data
         if year-1 in betaDict.keys():
             betas=betaDictCopy[year-1]['Beta'].squeeze()
+            #this preserves the index, any indeces that werent in year-1 will be nan (later dropped), any in year-1 but not year not included
             betaDictCopy[year]['Decile'] = pd.qcut(betas, 10,labels = [1,2,3,4,5,6,7,8,9,10])
     
             #removes any years where prior year data doesnt exist (prop year determines decile) 
             if year-2 not in betaDict.keys():
                 betaDictCopy.pop(year-1)
                 
-    #convert back to dictionary of dictionaries
+                
+    #convert back to dictionary of dictionaries (keeps only the decile column)
     for year in list(betaDictCopy.keys()):
         betaDictCopy[year] = betaDictCopy[year].iloc[: , 1:].squeeze().dropna().to_dict()
 
@@ -266,6 +297,7 @@ if __name__ == '__main__':
     pool.join()
  
     result = []
+    
     aggregate=[]
 
     #turn return lists into dataframes
@@ -275,7 +307,7 @@ if __name__ == '__main__':
         if ret !=-1:
             p,ap = ret
             if len(p)==0:
-                print('issue with one output - skipping - liekly lack of data')
+                print('issue with one output - skipping - likely lack of data')
                 continue
             if type(result)==list:
                 result=pd.concat(p)
@@ -324,12 +356,13 @@ if __name__ == '__main__':
     mrate=fred.get_series('DGS1MO',observation_start='1963-1-1').dropna()
     mrate.index = mrate.index.astype('datetime64[ns]')
     mrate.name="mrate"
-    mrate=mrate.to_frame()
+    mrate=mrate.to_frame()/100
     mrate['date']=mrate.index
     crsprate = db.raw_sql("""select ave_1, qdate
                             from crsp.riskfree 
                             where qdate>='1/01/1963'""", 
                           date_cols=['qdate'])
+    crsprate['ave_1']=    crsprate['ave_1']/100
     crsprate['date']=crsprate['qdate'].astype('datetime64[ns]')
     ratemerged = pd.merge(mrate, crsprate, on=['date'],how="outer")
     ratemerged.index=ratemerged['date']
@@ -337,18 +370,22 @@ if __name__ == '__main__':
     x=ratemerged['mrate'].fillna(ratemerged['ave_1'])
 
 
-    sp500.index=sp500['caldt']
-    merge=sp500.merge(x,left_index=True,right_index=True).dropna()
-    capmMerged = merge.merge(aggregate,left_index=True,right_index=True).dropna()
+    sp500_monthly.index=sp500_monthly['caldt']
+    merge=sp500_monthly.merge(x,left_index=True,right_index=True).dropna()
     
-    parts=[]
-    for decile, df in capmMerged.groupby(['decile']):
-        df = df.resample("M").last()
-        parts.append(df)
-    capmMerged=pd.concat(parts)
     
+    
+    aggregate['cumweightedReturn']=aggregate['weightedReturn']+1
+    monthlyAgg = (aggregate
+                  .groupby(["decile",pd.Grouper(freq='M')])['cumweightedReturn']
+                  .prod()-1).reset_index(level='decile')
+    
+    
+    
+    capmMerged = merge.merge(monthlyAgg,left_index=True,right_index=True).dropna()
+
     capmMerged['x']=capmMerged['vwretd'].sub(capmMerged['mrate'])
-    capmMerged['y']=capmMerged['weightedReturn'].sub(capmMerged['mrate'])
+    capmMerged['y']=capmMerged['cumweightedReturn'].sub(capmMerged['mrate'])
     capmMerged=capmMerged.dropna()
 
     #performs market beta regression
@@ -376,7 +413,7 @@ if __name__ == '__main__':
         one_df.name=decile
         plt.plot(one_df.index,one_df['capmbeta'])
     plt.legend([1,2,3,4,5,6,7,8,9,10])
-    plt.ylim([.75,1.3])
+    # plt.ylim([-.25,3])
     plt.title(rateType+" CAPM Beta")
     plt.savefig(rateType+'-Capm-Beta.png')
     plt.show() 
@@ -445,6 +482,7 @@ if __name__ == '__main__':
     qty = result.groupby(['year'])['permno'].count()
     ax.plot(qty.index,qty)
     ax.set_title('datapoints/year')
+    plt.savefig(rateType+'-DataPoint-Year.png')
     # ax.yaxis.set_major_formatter(FormatStrFormatter('% 1.2f'))
     plt.show()
     #%%
@@ -465,6 +503,7 @@ if __name__ == '__main__':
         worksheet.insert_image('C100',rateType+'-Dividend-Yield.png')
         worksheet.insert_image('C150',rateType+'-Earnings-Yield.png')
         worksheet.insert_image('C200',rateType+'-Price-Book.png')
+        worksheet.insert_image('C250',rateType+'-DataPoint-Year.png')
 
 
         for decile, one_df in aggregate.groupby(['decile']):   
@@ -473,5 +512,6 @@ if __name__ == '__main__':
             worksheet.set_column('A:J', 20)
         
 #%%
+
     
             
