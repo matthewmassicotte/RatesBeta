@@ -189,15 +189,11 @@ if __name__ == '__main__':
     fred = Fred(api_key='32e1507c555edb8d7de8a0977f22841d')
     import pandas as pd
         
-    x=[[True,'DGS10'],[True,'DGS2'],[True,'DTB3'],[False,'DGS10'],[False,'DGS2'],[False,'DTB3']]
+    x=[[False,'DGS10'],[False,'DGS2'],[False,'DTB3'],[True,'DGS10'],[True,'DGS2'],[True,'DTB3']]
         
     for args in x:
         weekly,ratecode=args
-        print(weekly)
-        print(ratecode)
-        print()
 
-        
 
         
         # ratecode = 'DGS10'
@@ -207,6 +203,10 @@ if __name__ == '__main__':
             rateType='10yr'
         elif ratecode == 'DTB3':
             rateType='3M'  #DGS3MO
+            
+        print(weekly)
+        print(rateType)
+        print()
                 
         #get rates from fred
         if weekly:
@@ -300,7 +300,7 @@ if __name__ == '__main__':
         for year in list(betaDictCopy.keys()):
             betaDictCopy[year] = betaDictCopy[year].iloc[: , 1:].squeeze().dropna().to_dict()
     
-    
+
         # Calculate the weighted returns for each decile (using multiprocess pool)
         pool = mp.Pool(mp.cpu_count())
         ret_list = pool.map(calcWeightedReturns, [[year, one_df,betaDictCopy] for year, one_df in test.groupby(test.index.year)])
@@ -329,7 +329,7 @@ if __name__ == '__main__':
     
         aggregate.columns=['date','decile','rate','weightedReturn','weightedPriceBook',	'weightedEY',	'weightedDY']
         aggregate=aggregate.set_index(['date'])
-        
+
         # Calculate betas for the deciles (weighted retun regressed on rates)
         aggregate['beta']=-1
         parts = []
@@ -353,7 +353,60 @@ if __name__ == '__main__':
                 parts.append(two_df)
         aggregate=pd.concat(parts)
         
+
+
+        spread=(aggregate[aggregate['decile']==1]-aggregate[aggregate['decile']==10]).dropna()
+        spread['decile']=-1
+        spread['rate']=aggregate[aggregate['decile']==10]['rate']
         
+        aggregate=pd.concat([aggregate,spread])
+        
+        years= aggregate[aggregate['decile']==1].index.year.unique()
+        
+        spData = pd.read_excel("/Users/matthewmassicotte/Documents/GitHub/RatesBeta/spData.xlsx")
+        
+        spData=spData[spData['Year'].isin(years)]
+        
+        
+        
+        spEY=spData['Earnings Yield'].mean()
+        spDY=spData['Dividend Yield'].mean()
+
+        sp500_rate= sp500.merge(rates,left_index=True,right_index=True).dropna()
+        
+        Y = sp500_rate['vwretd']
+        X = sp500_rate['rate']
+        X = sm.add_constant(X)
+        Y = Y.astype('float')
+        X = X.astype('float')
+        model = sm.OLS(Y,X)
+        results = model.fit()
+        spRateBeta=results.params['rate']
+        spCapmBeta=1
+
+
+        #Full-sample EY,DY,PB, Rates Betas
+        parts = [] 
+        for decile, two_df in aggregate.groupby(['decile']):
+                Y = two_df['weightedReturn']
+                X = two_df['rate']
+                X = sm.add_constant(X)
+                Y = Y.astype('float')
+                X = X.astype('float')
+                model = sm.OLS(Y,X)
+                results = model.fit()
+                
+                pb=two_df['weightedPriceBook'].mean()
+                ey=two_df['weightedEY'].mean()
+                dy=two_df['weightedDY'].mean()
+                
+                beta=results.params['rate']
+                parts.append([beta,pb,ey,dy,decile])
+        # aggregate=pd.concat(parts)
+        aggregate_fs=pd.DataFrame.from_records(parts)
+        aggregate_fs.columns=['RateBeta','PriceBook','EarningsYeild','DividendYeild','decile']
+        aggregate_fs.index=aggregate_fs['decile'].astype(int)
+        aggregate_fs=aggregate_fs.drop(['decile'],axis=1)
         
     
         
@@ -398,13 +451,14 @@ if __name__ == '__main__':
         capmMerged['x']=capmMerged['vwretd'].sub(capmMerged['mrate'])
         capmMerged['y']=capmMerged['cumweightedReturn'].sub(capmMerged['mrate'])
         capmMerged=capmMerged.dropna()
-    
-        #performs market beta regression
+
+        #performs market beta regression for each year
         parts=[]
         capmBetaDict=dict()
         for year, one_df in capmMerged.groupby(capmMerged.index.year):
             capmBetaDict2=dict()
             for decile, two_df in one_df.groupby(['decile']):
+                
                 Y = two_df['y']
                 X = two_df['x']
                 X = sm.add_constant(X)
@@ -413,26 +467,47 @@ if __name__ == '__main__':
                 model = sm.OLS(Y,X)
                 results = model.fit()
                 two_df['capmbeta']=results.params['x']
+                
                 parts.append(two_df)
                 capmBetaDict2[decile]=results.params['x']
             capmBetaDict[year]=capmBetaDict2
         capmResults=pd.concat(parts)
-    
+        
+        #Full sample campbeta
+        parts=[]
+        for decile, two_df in capmMerged.groupby(['decile']):
+            Y = two_df['y']
+            X = two_df['x']
+            X = sm.add_constant(X)
+            Y = Y.astype('float')
+            X = X.astype('float')
+            model = sm.OLS(Y,X)
+            results = model.fit()
+            # two_df['capmbeta']=results.params['x']
+            parts.append([decile,results.params['x']])
+        capmResults_fs=pd.DataFrame.from_records(parts)
+        aggregate_fs['CapmBeta']=capmResults_fs[1].values
+
+        if weekly:
+            freq='weeklyReturns'
+        else:
+            freq='dailyReturns'
+
         #Plot capmbetas over time
         plt.rcParams['figure.figsize'] = (10,10)
-        for decile, one_df in capmResults.groupby(['decile']):   
+        for decile, one_df in capmResults[capmResults['decile']>0].groupby(['decile']):   
             one_df.name=decile
             plt.plot(one_df.index,one_df['capmbeta'])
         plt.legend([1,2,3,4,5,6,7,8,9,10])
         # plt.ylim([-.25,3])
         plt.title(rateType+" CAPM Beta")
-        plt.savefig(rateType+'-Capm-Beta.png')
+        plt.savefig('/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-Capm-Beta.png')
         plt.show() 
     
         
         parts=[]
         #Add to 'aggregate' so it saves with with rest of the data
-        for year, one_df in aggregate.groupby(aggregate.index.year):
+        for year, one_df in aggregate[aggregate['decile']>0].groupby(aggregate[aggregate['decile']>0].index.year):
             for decile, two_df in one_df.groupby(['decile']):
                 two_df['capmBeta'] = capmBetaDict[year][decile]
                 parts.append(two_df)
@@ -441,80 +516,92 @@ if __name__ == '__main__':
     
         #Plot betas over time
         plt.rcParams['figure.figsize'] = (10,10)
-        for decile, one_df in aggregate.groupby(['decile']):   
+        for decile, one_df in aggregate[aggregate['decile']>0].groupby(['decile']):   
             one_df.name=decile
             plt.plot(one_df.index,one_df['beta'])
         plt.legend([1,2,3,4,5,6,7,8,9,10])
         plt.ylim([-.2,.5])
         plt.title(rateType+" Rate Beta")
-        plt.savefig(rateType+'-Rate-Beta.png')
+        plt.savefig('/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-Rate-Beta.png')
         plt.show()    
     
     
         
         #Plot price-book ratio over time
         plt.rcParams['figure.figsize'] = (10,10)
-        for decile, one_df in aggregate.groupby(['decile']):   
+        for decile, one_df in aggregate[aggregate['decile']>0].groupby(['decile']):   
             one_df.name=decile
             plt.plot(one_df.index,one_df['weightedPriceBook'])
         plt.ylim([-10,30])
         plt.legend([1,2,3,4,5,6,7,8,9,10])
         plt.title(rateType+" Price/Book")
-        plt.savefig(rateType+'-Price-Book.png')
+        plt.savefig('/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-Price-Book.png')
         plt.show()
     
         
         #Plot earning yield over time
         plt.rcParams['figure.figsize'] = (10,10)
-        for decile, one_df in aggregate.groupby(['decile']):   
+        for decile, one_df in aggregate[aggregate['decile']>0].groupby(['decile']):   
             one_df.name=decile
             plt.plot(one_df.index,one_df['weightedEY'])
         plt.ylim([-.4,.3])
         plt.legend([1,2,3,4,5,6,7,8,9,10])
         plt.title(rateType+" Earnings Yield")
-        plt.savefig(rateType+'-Earnings-Yield.png')
+        plt.savefig('/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-Earnings-Yield.png')
         plt.show()
     
         
         #Plot div yield over time
         plt.rcParams['figure.figsize'] = (10,10)
-        for decile, one_df in aggregate.groupby(['decile']):   
+        for decile, one_df in aggregate[aggregate['decile']>0].groupby(['decile']):   
             one_df.name=decile
             plt.plot(one_df.index,one_df['weightedDY'])
         plt.ylim([-.01,.1])
         plt.legend([1,2,3,4,5,6,7,8,9,10])
         plt.title(rateType+" Dividend Yield")
-        plt.savefig(rateType+'-Dividend-Yield.png')
+        plt.savefig('/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-Dividend-Yield.png')
         plt.show()
-    
-    
     
         fig, ax = plt.subplots()
         qty = result.groupby(['year'])['permno'].count()
         ax.plot(qty.index,qty)
         ax.set_title('datapoints/year')
-        plt.savefig(rateType+'-DataPoint-Year.png')
+        # plt.savefig('./'+rateType+'-DataPoint-Year.png')
+        plt.savefig('/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-DataPoint-Year.png')
         # ax.yaxis.set_major_formatter(FormatStrFormatter('% 1.2f'))
         plt.show()
     #     #%%
     # if __name__ == '__main__':
         #save to file
-        if weekly:
-            freq='weeklyReturns'
-        else:
-            freq='dailyReturns'
-        
+
         emptyDF= pd.DataFrame()
     
-        with pd.ExcelWriter("./SummaryStats-"+rateType+"-"+freq+".xlsx") as writer:
+        with pd.ExcelWriter("/Users/matthewmassicotte/Documents/GitHub/RatesBeta/SummaryStats-"+rateType+"-"+freq+".xlsx") as writer:
             emptyDF.to_excel(writer, sheet_name='charts', index=False)
             worksheet = writer.sheets['charts']
-            worksheet.insert_image('C2',rateType+'-Rate-Beta.png')
-            worksheet.insert_image('C50',rateType+'-Capm-Beta.png')
-            worksheet.insert_image('C100',rateType+'-Dividend-Yield.png')
-            worksheet.insert_image('C150',rateType+'-Earnings-Yield.png')
-            worksheet.insert_image('C200',rateType+'-Price-Book.png')
-            worksheet.insert_image('C250',rateType+'-DataPoint-Year.png')
+            worksheet.insert_image('C2','/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-Rate-Beta.png')
+            worksheet.insert_image('C50','/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-Capm-Beta.png')
+            worksheet.insert_image('C100','/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-Dividend-Yield.png')
+            worksheet.insert_image('C150','/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-Earnings-Yield.png')
+            worksheet.insert_image('C200','/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-Price-Book.png')
+            worksheet.insert_image('C250','/Users/matthewmassicotte/Documents/GitHub/RatesBeta/Plots/'+rateType+"-"+freq+'-DataPoint-Year.png')
+            
+            aggregate_fs[aggregate_fs.index>0].to_excel(writer, sheet_name=rateType+"-"+freq, index=True)
+            writer.sheets[rateType+"-"+freq].set_column('A:J', 15)
+            writer.sheets[rateType+"-"+freq].conditional_format('B2:B11', {'type': '3_color_scale'})
+            writer.sheets[rateType+"-"+freq].conditional_format('C2:C11', {'type': '3_color_scale'})
+            writer.sheets[rateType+"-"+freq].conditional_format('D2:D11', {'type': '3_color_scale'})
+            writer.sheets[rateType+"-"+freq].conditional_format('E2:E11', {'type': '3_color_scale'})
+            writer.sheets[rateType+"-"+freq].conditional_format('F2:F11', {'type': '3_color_scale'})
+            
+            df=aggregate_fs[aggregate_fs.index<0]
+            df.index=['Spread']
+            df.to_excel(writer, sheet_name=rateType+"-"+freq, index=True,startrow= 13,header=True)
+            df=pd.DataFrame([spRateBeta,'NA', spEY,spDY,spCapmBeta]).T
+            df.index=['Market']
+            df.to_excel(writer, sheet_name=rateType+"-"+freq,startrow= 15,header=False,index=True)
+
+
     
     
             for decile, one_df in aggregate.groupby(['decile']):   
@@ -522,7 +609,33 @@ if __name__ == '__main__':
                 worksheet = writer.sheets[str(int(decile))]
                 worksheet.set_column('A:J', 20)
             
-#%%
+        writer.close()
 
+        # try:
+        #     with pd.ExcelWriter("/Users/matthewmassicotte/Documents/GitHub/RatesBeta/FullSampleStats.xlsx",engine='openpyxl',mode='a') as writer:
+        #         aggregate_fs[aggregate_fs.index>0].to_excel(writer, sheet_name=rateType+"-"+freq, index=True)
+        #         writer.sheets[rateType+"-"+freq].set_column('A:J', 15)
+        #         writer.sheets[rateType+"-"+freq].conditional_format('B2:B11', {'type': '3_color_scale'})
+        #         writer.sheets[rateType+"-"+freq].conditional_format('C2:C11', {'type': '3_color_scale'})
+        #         writer.sheets[rateType+"-"+freq].conditional_format('D2:D11', {'type': '3_color_scale'})
+        #         writer.sheets[rateType+"-"+freq].conditional_format('E2:E11', {'type': '3_color_scale'})
+        #         writer.sheets[rateType+"-"+freq].conditional_format('F2:F11', {'type': '3_color_scale'})
+
+
+        # except:
+        #     with pd.ExcelWriter("/Users/matthewmassicotte/Documents/GitHub/RatesBeta/FullSampleStats.xlsx") as writer:
+        #         aggregate_fs[aggregate_fs.index>0].to_excel(writer, sheet_name=rateType+"-"+freq, index=True)
+        #         writer.sheets[rateType+"-"+freq].set_column('A:J', 15)
+        #         writer.sheets[rateType+"-"+freq].conditional_format('B2:B11', {'type': '3_color_scale'})
+        #         writer.sheets[rateType+"-"+freq].conditional_format('C2:C11', {'type': '3_color_scale'})
+        #         writer.sheets[rateType+"-"+freq].conditional_format('D2:D11', {'type': '3_color_scale'})
+        #         writer.sheets[rateType+"-"+freq].conditional_format('E2:E11', {'type': '3_color_scale'})
+        #         writer.sheets[rateType+"-"+freq].conditional_format('F2:F11', {'type': '3_color_scale'})
+                
+        # writer.close()
+
+
+# # import os
+# print(os.path.abspath(__file__))
     
             
